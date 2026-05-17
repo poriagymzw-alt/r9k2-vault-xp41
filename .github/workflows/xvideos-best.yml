@@ -7,6 +7,17 @@ on:
         description: "Public XVideos URL"
         required: true
         type: string
+      quality:
+        description: "Video quality"
+        required: true
+        type: choice
+        default: "best"
+        options:
+          - "360"
+          - "480"
+          - "720"
+          - "1080"
+          - "best"
 
 permissions:
   contents: read
@@ -27,9 +38,10 @@ jobs:
           yt-dlp --version
           ffmpeg -version | head -n 1
 
-      - name: Download best quality
+      - name: Download selected quality
         env:
           URL: ${{ github.event.inputs.url }}
+          QUALITY: ${{ github.event.inputs.quality }}
         run: |
           set -e
           mkdir -p downloads logs
@@ -39,14 +51,39 @@ jobs:
             exit 1
           fi
 
+          case "$QUALITY" in
+            360)
+              FORMAT='bv*[height<=360]+ba/b[height<=360]/best[height<=360]/best'
+              ;;
+            480)
+              FORMAT='bv*[height<=480]+ba/b[height<=480]/best[height<=480]/best'
+              ;;
+            720)
+              FORMAT='bv*[height<=720]+ba/b[height<=720]/best[height<=720]/best'
+              ;;
+            1080)
+              FORMAT='bv*[height<=1080]+ba/b[height<=1080]/best[height<=1080]/best'
+              ;;
+            best)
+              FORMAT='bv*+ba/best'
+              ;;
+            *)
+              echo "Unknown quality: $QUALITY"
+              exit 1
+              ;;
+          esac
+
+          echo "Selected quality: $QUALITY"
+          echo "Format: $FORMAT"
+
           echo "Testing URL..."
           yt-dlp --simulate --skip-download --no-playlist "$URL" | tee logs/test.log
 
-          echo "Downloading best quality..."
+          echo "Downloading..."
           yt-dlp "$URL" \
             -P downloads \
             -o "XVideos/%(title).180B_%(id)s.%(ext)s" \
-            -f "bv*+ba/best" \
+            -f "$FORMAT" \
             --merge-output-format mp4 \
             --remux-video mp4 \
             --no-playlist \
@@ -67,7 +104,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: xvideos-best
+          name: xvideos-${{ github.event.inputs.quality }}
           path: |
             downloads/**
             logs/**
