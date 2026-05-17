@@ -1,0 +1,76 @@
+name: xvideos-best
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "Public XVideos URL"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          python -m pip install --upgrade pip yt-dlp
+          yt-dlp --version
+          ffmpeg -version | head -n 1
+
+      - name: Download best quality
+        env:
+          URL: ${{ github.event.inputs.url }}
+        run: |
+          set -e
+          mkdir -p downloads logs
+
+          if ! echo "$URL" | grep -Eiq '^https?://([^/]+\.)?xvideos\.com/'; then
+            echo "Only XVideos URLs are allowed"
+            exit 1
+          fi
+
+          echo "Testing URL..."
+          yt-dlp --simulate --skip-download --no-playlist "$URL" | tee logs/test.log
+
+          echo "Downloading best quality..."
+          yt-dlp "$URL" \
+            -P downloads \
+            -o "XVideos/%(title).180B_%(id)s.%(ext)s" \
+            -f "bv*+ba/best" \
+            --merge-output-format mp4 \
+            --remux-video mp4 \
+            --no-playlist \
+            --continue \
+            --no-overwrites \
+            --retries 10 \
+            --fragment-retries 30 \
+            --concurrent-fragments 4 \
+            --restrict-filenames \
+            --windows-filenames \
+            --trim-filenames 180 \
+            --newline \
+            --progress \
+            2>&1 | tee logs/download.log
+
+          find downloads -type f -print
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xvideos-best
+          path: |
+            downloads/**
+            logs/**
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 0
