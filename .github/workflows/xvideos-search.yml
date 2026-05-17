@@ -1,0 +1,314 @@
+name: xvideos-search-gallery
+
+on:
+  workflow_dispatch:
+    inputs:
+      query:
+        description: "Search words"
+        required: true
+        type: string
+      count:
+        description: "Number of results"
+        required: true
+        type: choice
+        default: "20"
+        options:
+          - "10"
+          - "20"
+          - "30"
+
+permissions:
+  contents: read
+
+jobs:
+  search:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image gallery search result
+        env:
+          QUERY: ${{ github.event.inputs.query }}
+          COUNT: ${{ github.event.inputs.count }}
+        run: |
+          set -e
+          mkdir -p gallery/thumbs logs
+
+          cat > search_gallery.py <<'PY'
+          import os
+          import re
+          import html
+          import time
+          import urllib.parse
+          import urllib.request
+          from pathlib import Path
+
+          BASE = "https://www.xvideos.com"
+          QUERY = os.environ["QUERY"]
+          COUNT = int(os.environ.get("COUNT", "20"))
+          UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
+
+          Path("gallery/thumbs").mkdir(parents=True, exist_ok=True)
+          Path("logs").mkdir(exist_ok=True)
+
+          def fetch(url):
+              req = urllib.request.Request(url, headers={"User-Agent": UA})
+              with urllib.request.urlopen(req, timeout=40) as r:
+                  return r.read().decode("utf-8", errors="ignore")
+
+          def fetch_bytes(url):
+              req = urllib.request.Request(url, headers={"User-Agent": UA})
+              with urllib.request.urlopen(req, timeout=40) as r:
+                  return r.read()
+
+          def clean(s):
+              s = html.unescape(s or "")
+              s = re.sub(r"<[^>]+>", " ", s)
+              s = re.sub(r"\s+", " ", s).strip()
+              return s
+
+          def abs_url(u):
+              u = html.unescape(u or "").strip()
+              if u.startswith("//"):
+                  return "https:" + u
+              if u.startswith("/"):
+                  return BASE + u
+              return u
+
+          def title_from_url(url):
+              slug = url.rstrip("/").split("/")[-1]
+              slug = urllib.parse.unquote(slug)
+              slug = slug.replace("_", " ").replace("-", " ").replace(".", " ")
+              return clean(slug) or "unknown title"
+
+          def parse(page):
+              results = []
+              seen = set()
+
+              blocks = re.findall(
+                  r'<div[^>]+class="[^"]*thumb-block[^"]*"[^>]*>.*?</div>\s*</div>',
+                  page,
+                  flags=re.I | re.S
+              )
+
+              for block in blocks:
+                  href_m = re.search(r'href="([^"]*/video[^"]+)"', block, flags=re.I)
+                  if not href_m:
+                      continue
+
+                  url = abs_url(href_m.group(1))
+
+                  if url in seen:
+                      continue
+
+                  seen.add(url)
+
+                  title = ""
+                  title_m = re.search(r'title="([^"]+)"', block, flags=re.I)
+                  if title_m:
+                      title = clean(title_m.group(1))
+
+                  if not title:
+                      title = title_from_url(url)
+
+                  thumb = ""
+                  for key in ["data-src", "data-original", "src"]:
+                      img_m = re.search(key + r'="([^"]+)"', block, flags=re.I)
+                      if img_m:
+                          candidate = abs_url(img_m.group(1))
+                          if candidate and not candidate.startswith("data:"):
+                              thumb = candidate
+                              break
+
+                  duration = ""
+                  dur_m = re.search(r'(\d{1,2}:\d{2}(?::\d{2})?)', clean(block))
+                  if dur_m:
+                      duration = dur_m.group(1)
+
+                  results.append({
+                      "title": title,
+                      "url": url,
+                      "thumb": thumb,
+                      "duration": duration,
+                  })
+
+              return results
+
+          q = urllib.parse.quote_plus(QUERY)
+          all_results = []
+          seen_urls = set()
+          page_num = 0
+
+          while len(all_results) < COUNT and page_num < 5:
+              search_url = f"{BASE}/?k={q}" if page_num == 0 else f"{BASE}/?k={q}&p={page_num}"
+              print(f"[search] {search_url}")
+
+              try:
+                  page = fetch(search_url)
+              except Exception as e:
+                  print(f"[error] fetch failed: {e}")
+                  break
+
+              results = parse(page)
+
+              for item in results:
+                  if item["url"] not in seen_urls:
+                      seen_urls.add(item["url"])
+                      all_results.append(item)
+
+                  if len(all_results) >= COUNT:
+                      break
+
+              page_num += 1
+              time.sleep(1)
+
+          all_results = all_results[:COUNT]
+
+          for i, item in enumerate(all_results, 1):
+              item["local_thumb"] = ""
+
+              if item["thumb"]:
+                  try:
+                      data = fetch_bytes(item["thumb"])
+                      ext = ".jpg"
+                      if ".webp" in item["thumb"].lower():
+                          ext = ".webp"
+                      elif ".png" in item["thumb"].lower():
+                          ext = ".png"
+
+                      local_name = f"thumbs/{i:02d}{ext}"
+                      Path("gallery", local_name).write_bytes(data)
+                      item["local_thumb"] = local_name
+                  except Exception as e:
+                      print(f"[warn] thumb download failed for #{i}: {e}")
+
+          with open("gallery/results.tsv", "w", encoding="utf-8") as f:
+              f.write("index\ttitle\tduration\turl\tthumb\n")
+              for i, item in enumerate(all_results, 1):
+                  f.write(f"{i}\t{item['title']}\t{item['duration']}\t{item['url']}\t{item['thumb']}\n")
+
+          cards = []
+
+          for i, item in enumerate(all_results, 1):
+              title = html.escape(item["title"])
+              url = html.escape(item["url"])
+              duration = html.escape(item["duration"])
+              local_thumb = html.escape(item["local_thumb"])
+
+              if local_thumb:
+                  img = f'<img src="{local_thumb}" loading="lazy">'
+              else:
+                  img = '<div class="noimg">No image</div>'
+
+              cards.append(f"""
+              <div class="card">
+                <a class="thumb" href="{url}" target="_blank">{img}</a>
+                <div class="body">
+                  <div class="num">#{i}</div>
+                  <a class="title" href="{url}" target="_blank">{title}</a>
+                  <div class="duration">{duration}</div>
+                  <div class="link">{url}</div>
+                  <button onclick="navigator.clipboard.writeText('{url}')">Copy link</button>
+                </div>
+              </div>
+              """)
+
+          doc = f"""<!doctype html>
+          <html>
+          <head>
+          <meta charset="utf-8">
+          <title>XVideos Search Gallery</title>
+          <style>
+          body {{
+            margin: 0;
+            padding: 24px;
+            font-family: Arial, sans-serif;
+            background: #111;
+            color: #eee;
+          }}
+          h1 {{ margin-top: 0; }}
+          .grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+            gap: 16px;
+          }}
+          .card {{
+            background: #1b1b1b;
+            border: 1px solid #333;
+            border-radius: 14px;
+            overflow: hidden;
+          }}
+          .thumb {{
+            display: block;
+            height: 170px;
+            background: #222;
+          }}
+          .thumb img {{
+            width: 100%;
+            height: 170px;
+            object-fit: cover;
+            display: block;
+          }}
+          .noimg {{
+            height: 170px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #999;
+          }}
+          .body {{ padding: 12px; }}
+          .num {{ color: #aaa; font-size: 13px; margin-bottom: 6px; }}
+          .title {{
+            display: block;
+            color: white;
+            font-weight: bold;
+            text-decoration: none;
+            margin-bottom: 8px;
+          }}
+          .title:hover {{ text-decoration: underline; }}
+          .duration {{ color: #ffcc66; margin-bottom: 8px; }}
+          .link {{
+            color: #aaa;
+            font-size: 12px;
+            word-break: break-all;
+            margin-bottom: 10px;
+          }}
+          button {{
+            background: #2563eb;
+            color: white;
+            border: 0;
+            border-radius: 8px;
+            padding: 8px 10px;
+            cursor: pointer;
+          }}
+          </style>
+          </head>
+          <body>
+          <h1>XVideos Search Gallery</h1>
+          <p>Query: <b>{html.escape(QUERY)}</b></p>
+          <p>Total shown: <b>{len(all_results)}</b></p>
+          <div class="grid">
+          {''.join(cards)}
+          </div>
+          </body>
+          </html>
+          """
+
+          Path("gallery/index.html").write_text(doc, encoding="utf-8")
+          print(f"[done] results: {len(all_results)}")
+          PY
+
+          python3 search_gallery.py | tee logs/search.log
+
+      - name: Upload search gallery
+        uses: actions/upload-artifact@v4
+        with:
+          name: xvideos-search-gallery
+          path: |
+            gallery/**
+            logs/**
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 0
