@@ -1,0 +1,263 @@
+name: strong-no-login-public-video-downloader
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "Single public video URL. Leave empty if using urls.txt"
+        required: false
+        type: string
+        default: ""
+      quality:
+        description: "Video quality"
+        required: true
+        type: choice
+        default: "720"
+        options:
+          - "best"
+          - "1080"
+          - "720"
+          - "480"
+          - "360"
+      artifact_name:
+        description: "Artifact name"
+        required: false
+        type: string
+        default: "downloaded-video"
+      keep_days:
+        description: "Artifact retention days"
+        required: true
+        type: choice
+        default: "1"
+        options:
+          - "1"
+          - "2"
+          - "3"
+          - "7"
+
+permissions:
+  contents: read
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install tools
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg ca-certificates curl coreutils
+
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade yt-dlp
+
+          echo "yt-dlp:"
+          yt-dlp --version
+
+          echo "ffmpeg:"
+          ffmpeg -version | head -n 1
+
+      - name: Prepare folders and URLs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p downloads temp logs
+
+          : > clean_urls.txt
+
+          INPUT_URL="${{ github.event.inputs.url }}"
+
+          if [ -n "$INPUT_URL" ]; then
+            printf "%s\n" "$INPUT_URL" >> clean_urls.txt
+          fi
+
+          if [ -f urls.txt ]; then
+            sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' urls.txt >> clean_urls.txt
+          fi
+
+          sed -i 's/\r$//' clean_urls.txt
+          sort -u clean_urls.txt -o clean_urls.txt
+
+          if [ ! -s clean_urls.txt ]; then
+            echo "No URL provided. Put a URL in workflow input or urls.txt."
+            exit 1
+          fi
+
+          BAD_URLS="$(grep -Eiv '^https?://([^/]+\.)?pornhub\.(com|org)/' clean_urls.txt || true)"
+
+          if [ -n "$BAD_URLS" ]; then
+            echo "Only public Pornhub URLs are allowed in this no-login workflow."
+            echo "$BAD_URLS"
+            exit 1
+          fi
+
+          echo "URLs count:"
+          wc -l clean_urls.txt
+
+      - name: Select quality
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          QUALITY="${{ github.event.inputs.quality }}"
+
+          case "$QUALITY" in
+            best)
+              FORMAT='bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/best'
+              ;;
+            1080)
+              FORMAT='bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080][ext=mp4]/bv*[height<=1080]+ba/best[height<=1080]/best'
+              ;;
+            720)
+              FORMAT='bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720][ext=mp4]/bv*[height<=720]+ba/best[height<=720]/best'
+              ;;
+            480)
+              FORMAT='bv*[height<=480][ext=mp4]+ba[ext=m4a]/b[height<=480][ext=mp4]/bv*[height<=480]+ba/best[height<=480]/best'
+              ;;
+            360)
+              FORMAT='bv*[height<=360][ext=mp4]+ba[ext=m4a]/b[height<=360][ext=mp4]/bv*[height<=360]+ba/best[height<=360]/best'
+              ;;
+            *)
+              echo "Unknown quality: $QUALITY"
+              exit 1
+              ;;
+          esac
+
+          echo "YTDLP_FORMAT=$FORMAT" >> "$GITHUB_ENV"
+          echo "Selected format: $FORMAT"
+
+      - name: Test URLs without downloading
+        shell: bash
+        run: |
+          set +e
+
+          yt-dlp \
+            --batch-file clean_urls.txt \
+            --simulate \
+            --skip-download \
+            --no-playlist \
+            --no-color \
+            --newline \
+            --print "%(extractor)s | %(id)s | %(title)s | %(duration_string|unknown)s" \
+            2>&1 | tee logs/test.log
+
+          exit 0
+
+      - name: Download with strong retry
+        id: download
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          MAX_ROUNDS=6
+          ROUND=1
+          SUCCESS=false
+
+          while [ "$ROUND" -le "$MAX_ROUNDS" ]; do
+            echo "========== Download round $ROUND/$MAX_ROUNDS =========="
+
+            set +e
+
+            yt-dlp \
+              --batch-file clean_urls.txt \
+              --paths "home:downloads" \
+              --paths "temp:temp" \
+              --output "%(uploader|unknown_uploader)s/%(title).180B_%(id)s.%(ext)s" \
+              --format "$YTDLP_FORMAT" \
+              --merge-output-format mp4 \
+              --remux-video mp4 \
+              --no-playlist \
+              --continue \
+              --no-overwrites \
+              --ignore-errors \
+              --retries 10 \
+              --fragment-retries 30 \
+              --file-access-retries 10 \
+              --extractor-retries 8 \
+              --retry-sleep "http:exp=1:30" \
+              --retry-sleep "fragment:exp=1:30" \
+              --concurrent-fragments 3 \
+              --socket-timeout 40 \
+              --sleep-requests 2 \
+              --sleep-interval 3 \
+              --max-sleep-interval 12 \
+              --restrict-filenames \
+              --windows-filenames \
+              --trim-filenames 170 \
+              --check-formats \
+              --no-color \
+              --newline \
+              --progress \
+              2>&1 | tee "logs/download-round-${ROUND}.log"
+
+            YTDLP_EXIT="${PIPESTATUS[0]}"
+            set -e
+
+            FILE_COUNT="$(find downloads -type f \( -name '*.mp4' -o -name '*.mkv' -o -name '*.webm' -o -name '*.m4v' \) | wc -l | tr -d ' ')"
+
+            echo "yt-dlp exit code: $YTDLP_EXIT"
+            echo "Downloaded media files: $FILE_COUNT"
+
+            if [ "$FILE_COUNT" -gt 0 ]; then
+              SUCCESS=true
+              break
+            fi
+
+            ROUND=$((ROUND + 1))
+
+            if [ "$ROUND" -le "$MAX_ROUNDS" ]; then
+              SLEEP_TIME=$((ROUND * 25))
+              echo "No final media file detected. Sleeping $SLEEP_TIME seconds..."
+              sleep "$SLEEP_TIME"
+            fi
+          done
+
+          if [ "$SUCCESS" != "true" ]; then
+            echo "All download rounds failed."
+            tail -n 120 logs/download-round-*.log || true
+            exit 1
+          fi
+
+          echo "Downloaded files:"
+          find downloads -type f -print
+
+      - name: Create manifest
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "# Download Manifest"
+            echo
+            echo "Run ID: $GITHUB_RUN_ID"
+            echo "Repository: $GITHUB_REPOSITORY"
+            echo "Quality: ${{ github.event.inputs.quality }}"
+            echo "Date UTC: $(date -u)"
+            echo
+            echo "## Files"
+            find downloads -type f -printf "%p | %s bytes\n" 2>/dev/null || true
+            echo
+            echo "## Logs"
+            find logs -type f -printf "%p | %s bytes\n" 2>/dev/null || true
+          } > manifest.txt
+
+          cat manifest.txt
+
+      - name: Upload result as GitHub artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.inputs.artifact_name }}
+          path: |
+            downloads/**
+            logs/**
+            manifest.txt
+          retention-days: ${{ github.event.inputs.keep_days }}
+          if-no-files-found: error
+          compression-level: 0
