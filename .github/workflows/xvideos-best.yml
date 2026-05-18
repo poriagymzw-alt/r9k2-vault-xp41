@@ -113,17 +113,23 @@ jobs:
           compression-level: 0
 
 
-      - name: Make release ZIP
-        continue-on-error: true
+
+      - name: Make unique release ZIP
         run: |
           set -e
-          rm -f pack-r9k2.zip
+
+          TS="$(date -u +%Y%m%d-%H%M%S)"
+          ASSET_NAME="pack-r9k2-${{ github.run_number }}-${TS}.zip"
+
+          echo "ASSET_NAME=$ASSET_NAME" >> "$GITHUB_ENV"
 
           python3 - <<'PYZIP'
+          import os
           from pathlib import Path
           from zipfile import ZipFile, ZIP_DEFLATED
 
           src = Path("downloads")
+          asset = os.environ["ASSET_NAME"]
 
           if not src.exists():
               raise SystemExit("downloads folder not found")
@@ -133,13 +139,14 @@ jobs:
           if not files:
               raise SystemExit("downloads folder is empty")
 
-          with ZipFile("pack-r9k2.zip", "w", ZIP_DEFLATED) as z:
+          with ZipFile(asset, "w", ZIP_DEFLATED) as z:
               for f in files:
                   z.write(f, f.relative_to(src.parent))
           PYZIP
 
-      - name: Upload ZIP to Release
-        continue-on-error: true
+          ls -lh "$ASSET_NAME"
+
+      - name: Upload unique ZIP to Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -147,8 +154,13 @@ jobs:
 
           TAG="r-${{ github.run_number }}-$(date -u +%Y%m%d-%H%M%S)"
 
-          gh release create "$TAG" pack-r9k2.zip \
+          gh release create "$TAG" "$ASSET_NAME" \
             --repo "${{ github.repository }}" \
             --title "update" \
             --notes "update" \
             --latest
+
+          echo "Release file name:"
+          echo "$ASSET_NAME"
+          echo "Download link:"
+          echo "https://github.com/${{ github.repository }}/releases/download/$TAG/$ASSET_NAME"
