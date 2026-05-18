@@ -1,0 +1,46 @@
+name: release-pack
+
+on:
+  workflow_run:
+    workflows: ["xvideos-best"]
+    types:
+      - completed
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  release:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download artifact and upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          REPO: ${{ github.repository }}
+        run: |
+          mkdir -p out
+
+          gh run download "$RUN_ID" \
+            --repo "$REPO" \
+            --dir out
+
+          ZIP_FILE=$(find out -type f -name "*.zip" | head -n 1)
+
+          if [ -z "$ZIP_FILE" ]; then
+            echo "No ZIP file found in artifact."
+            exit 1
+          fi
+
+          cp "$ZIP_FILE" pack-r9k2.zip
+
+          TAG="r-$(date +%Y%m%d-%H%M%S)"
+
+          gh release create "$TAG" pack-r9k2.zip \
+            --repo "$REPO" \
+            --title "update" \
+            --notes "update" \
+            --latest
