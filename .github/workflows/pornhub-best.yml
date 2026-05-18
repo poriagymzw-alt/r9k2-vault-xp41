@@ -43,7 +43,7 @@ jobs:
           yt-dlp --version
           ffmpeg -version | head -n 1
 
-      - name: Download public Pornhub video
+      - name: Download public Pornhub video with browser headers
         shell: bash
         env:
           URL: ${{ github.event.inputs.url }}
@@ -59,6 +59,16 @@ jobs:
             exit 1
           fi
 
+          VIEWKEY="$(echo "$URL" | sed -n 's/.*viewkey=\([^&?#]*\).*/\1/p')"
+
+          if [ -z "$VIEWKEY" ]; then
+            echo "Could not find viewkey in URL."
+            exit 1
+          fi
+
+          URL1="https://www.pornhub.com/view_video.php?viewkey=$VIEWKEY"
+          URL2="https://m.pornhub.com/view_video.php?viewkey=$VIEWKEY"
+
           case "$QUALITY" in
             360) FORMAT='bv*[height<=360]+ba/b[height<=360]/best[height<=360]/best' ;;
             480) FORMAT='bv*[height<=480]+ba/b[height<=480]/best[height<=480]/best' ;;
@@ -68,50 +78,61 @@ jobs:
             *) echo "Unknown quality: $QUALITY"; exit 1 ;;
           esac
 
-          echo "Selected quality: $QUALITY"
-          echo "Testing URL without cookies, login, or bypass..."
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 
-          if ! yt-dlp --simulate --skip-download --no-playlist "$URL" 2>&1 | tee logs/test.log; then
-            echo "Test failed. This public URL is not downloadable from GitHub runner without login/cookie."
+          common_args=(
+            --user-agent "$UA"
+            --referer "https://www.pornhub.com/"
+            --add-header "Accept-Language: en-US,en;q=0.9"
+            --add-header "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            --no-playlist
+            --force-ipv4
+            --retries 10
+            --fragment-retries 30
+            --extractor-retries 3
+            --concurrent-fragments 4
+            --restrict-filenames
+            --windows-filenames
+            --trim-filenames 180
+            --newline
+            --progress
+          )
+
+          SUCCESS=0
+
+          for TRY_URL in "$URL1" "$URL2"; do
+            echo "Testing: $TRY_URL" | tee -a logs/test.log
+
+            if yt-dlp "${common_args[@]}" --simulate --skip-download "$TRY_URL" 2>&1 | tee -a logs/test.log; then
+              echo "Test passed. Downloading: $TRY_URL" | tee -a logs/download.log
+
+              if yt-dlp "${common_args[@]}" \
+                -P downloads \
+                -o "Pornhub/%(title).180B_%(id)s.%(ext)s" \
+                -f "$FORMAT" \
+                --merge-output-format mp4 \
+                --remux-video mp4 \
+                --continue \
+                --no-overwrites \
+                "$TRY_URL" 2>&1 | tee -a logs/download.log; then
+
+                VIDEO_COUNT="$(find downloads -type f \( -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.webm' \) | wc -l)"
+
+                if [ "$VIDEO_COUNT" -gt 0 ]; then
+                  SUCCESS=1
+                  break
+                fi
+              fi
+            fi
+
+            echo "This URL variant failed. Trying next one..." | tee -a logs/download.log
+          done
+
+          if [ "$SUCCESS" -ne 1 ]; then
+            echo "Download failed. No fake artifact or fake release will be created."
             exit 1
           fi
 
-          echo "Downloading..."
-
-          if ! yt-dlp "$URL" \
-            -P downloads \
-            -o "Pornhub/%(title).180B_%(id)s.%(ext)s" \
-            -f "$FORMAT" \
-            --merge-output-format mp4 \
-            --remux-video mp4 \
-            --no-playlist \
-            --continue \
-            --no-overwrites \
-            --retries 10 \
-            --fragment-retries 30 \
-            --concurrent-fragments 4 \
-            --restrict-filenames \
-            --windows-filenames \
-            --trim-filenames 180 \
-            --newline \
-            --progress \
-            2>&1 | tee logs/download.log; then
-            echo "Download failed. No release will be created."
-            exit 1
-          fi
-
-          echo "Checking downloaded video files..."
-
-          VIDEO_COUNT=$(find downloads -type f \( -iname "*.mp4" -o -iname "*.mkv" -o -iname "*.webm" \) | wc -l)
-
-          if [ "$VIDEO_COUNT" -eq 0 ]; then
-            echo "No real video file was downloaded."
-            echo "Stopping here so fake 700KB log ZIP will not be uploaded."
-            find downloads -type f -print || true
-            exit 1
-          fi
-
-          echo "Downloaded video files:"
           find downloads -type f \( -iname "*.mp4" -o -iname "*.mkv" -o -iname "*.webm" \) -print
 
       - name: Upload artifact
@@ -149,7 +170,7 @@ jobs:
           ]
 
           if not files:
-              raise SystemExit("No video files found. Release ZIP will not be created.")
+              raise SystemExit("No real video files found. Release ZIP will not be created.")
 
           with ZipFile(asset, "w", ZIP_DEFLATED) as z:
               for f in files:
