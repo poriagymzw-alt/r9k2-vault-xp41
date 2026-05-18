@@ -119,7 +119,7 @@ jobs:
           set -e
 
           TS="$(date -u +%Y%m%d-%H%M%S)"
-          ASSET_NAME="pack-r9k2-${{ github.run_number }}-${TS}.zip"
+          export ASSET_NAME="pack-r9k2-${{ github.run_number }}-${TS}.zip"
 
           echo "ASSET_NAME=$ASSET_NAME" >> "$GITHUB_ENV"
 
