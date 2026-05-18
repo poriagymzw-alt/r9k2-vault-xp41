@@ -114,6 +114,7 @@ jobs:
 
 
       - name: Make release ZIP
+        continue-on-error: true
         run: |
           set -e
           rm -f pack-r9k2.zip
@@ -138,6 +139,7 @@ jobs:
           PYZIP
 
       - name: Upload ZIP to Release
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
