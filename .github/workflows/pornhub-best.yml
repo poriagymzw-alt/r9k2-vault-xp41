@@ -1,0 +1,168 @@
+name: pornhub-best
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "Public Pornhub video URL"
+        required: true
+        type: string
+      quality:
+        description: "Video quality"
+        required: true
+        type: choice
+        default: "best"
+        options:
+          - "360"
+          - "480"
+          - "720"
+          - "1080"
+          - "best"
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade --pre yt-dlp
+          yt-dlp --version
+          ffmpeg -version | head -n 1
+
+      - name: Download public Pornhub video
+        env:
+          URL: ${{ github.event.inputs.url }}
+          QUALITY: ${{ github.event.inputs.quality }}
+        run: |
+          set -e
+
+          mkdir -p downloads logs
+
+          if ! echo "$URL" | grep -Eiq '^https?://([^/]+\.)?pornhub\.com/'; then
+            echo "Only public Pornhub URLs are allowed."
+            exit 1
+          fi
+
+          case "$QUALITY" in
+            360)
+              FORMAT='bv*[height<=360]+ba/b[height<=360]/best[height<=360]/best'
+              ;;
+            480)
+              FORMAT='bv*[height<=480]+ba/b[height<=480]/best[height<=480]/best'
+              ;;
+            720)
+              FORMAT='bv*[height<=720]+ba/b[height<=720]/best[height<=720]/best'
+              ;;
+            1080)
+              FORMAT='bv*[height<=1080]+ba/b[height<=1080]/best[height<=1080]/best'
+              ;;
+            best)
+              FORMAT='bv*+ba/best'
+              ;;
+            *)
+              echo "Unknown quality: $QUALITY"
+              exit 1
+              ;;
+          esac
+
+          echo "Selected quality: $QUALITY"
+          echo "Testing URL without cookies, login, or bypass..."
+
+          yt-dlp --simulate --skip-download --no-playlist "$URL" 2>&1 | tee logs/test.log
+
+          echo "Downloading..."
+
+          yt-dlp "$URL" \
+            -P downloads \
+            -o "Pornhub/%(title).180B_%(id)s.%(ext)s" \
+            -f "$FORMAT" \
+            --merge-output-format mp4 \
+            --remux-video mp4 \
+            --no-playlist \
+            --continue \
+            --no-overwrites \
+            --retries 10 \
+            --fragment-retries 30 \
+            --concurrent-fragments 4 \
+            --restrict-filenames \
+            --windows-filenames \
+            --trim-filenames 180 \
+            --newline \
+            --progress \
+            2>&1 | tee logs/download.log
+
+          find downloads -type f -print
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pornhub-${{ github.event.inputs.quality }}
+          path: |
+            downloads/**
+            logs/**
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Make unique release ZIP
+        run: |
+          set -e
+
+          TS="$(date -u +%Y%m%d-%H%M%S)"
+          export ASSET_NAME="video-${{ github.run_number }}-${TS}.zip"
+          echo "ASSET_NAME=$ASSET_NAME" >> "$GITHUB_ENV"
+
+          python3 - <<'PYZIP'
+          import os
+          from pathlib import Path
+          from zipfile import ZipFile, ZIP_DEFLATED
+
+          src = Path("downloads")
+          asset = os.environ["ASSET_NAME"]
+
+          if not src.exists():
+              raise SystemExit("downloads folder not found")
+
+          files = [p for p in src.rglob("*") if p.is_file()]
+
+          if not files:
+              raise SystemExit("downloads folder is empty")
+
+          with ZipFile(asset, "w", ZIP_DEFLATED) as z:
+              for f in files:
+                  z.write(f, f.relative_to(src.parent))
+          PYZIP
+
+          ls -lh "$ASSET_NAME"
+
+      - name: Upload unique ZIP to Release
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          set -e
+
+          TAG="p-${{ github.run_number }}-$(date -u +%Y%m%d-%H%M%S)"
+
+          gh release create "$TAG" "$ASSET_NAME" \
+            --repo "${{ github.repository }}" \
+            --title "update" \
+            --notes "update" \
+            --latest
+
+          echo "Release file name:"
+          echo "$ASSET_NAME"
+
+          echo "Download link:"
+          echo "https://github.com/${{ github.repository }}/releases/download/$TAG/$ASSET_NAME"
