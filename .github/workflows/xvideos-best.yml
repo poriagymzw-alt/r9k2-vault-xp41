@@ -148,7 +148,7 @@ jobs:
 
       - name: Upload unique ZIP to Release
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           set -e
 
