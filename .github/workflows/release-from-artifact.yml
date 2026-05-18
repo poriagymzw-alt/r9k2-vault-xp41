@@ -1,0 +1,59 @@
+name: release-pack
+
+on:
+  workflow_run:
+    workflows: ["xvideos-best"]
+    types:
+      - completed
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  release:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Upload artifact archive to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -e
+
+          echo "Repo: $REPO"
+          echo "Run ID: $RUN_ID"
+
+          ARTIFACT_ID=$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" \
+            --jq '.artifacts[0].id')
+
+          if [ -z "$ARTIFACT_ID" ] || [ "$ARTIFACT_ID" = "null" ]; then
+            echo "No artifact found for this run."
+            exit 1
+          fi
+
+          echo "Artifact ID: $ARTIFACT_ID"
+
+          curl -L \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -o pack-r9k2.zip \
+            "https://api.github.com/repos/$REPO/actions/artifacts/$ARTIFACT_ID/zip"
+
+          if [ ! -s pack-r9k2.zip ]; then
+            echo "pack-r9k2.zip was not created."
+            exit 1
+          fi
+
+          TAG="r-${{ github.run_number }}-$(date -u +%Y%m%d-%H%M%S)"
+
+          gh release create "$TAG" pack-r9k2.zip \
+            --repo "$REPO" \
+            --title "update" \
+            --notes "update" \
+            --latest
+
+          echo "Release uploaded successfully."
